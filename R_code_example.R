@@ -1,10 +1,14 @@
-########################################################################################
-# This program describes feature detection, quality control and spectra generation for #
-# PIVUS data. Real data are not shared, but the skelthon of the program can be applied #
-# to every UPLC-MS/MS data. Three data sources are used: 1. Raw data (.CDF format)     #
-# 2. ID to identify samples from same individual (XXXnamesXXX) 3. Phenotypic data to   #
-# identify variables of unwanted variabiloty that need to be adjusted.                 #
-########################################################################################
+##############################################################################################
+# This program describes feature detection, quality control and spectra generation for       #
+# PIVUS data. Real data are not shared, but the skelthon of the program can be applied       #
+# to every UPLC-MS/MS data. Three data sources are used:                                     # 
+# 1. Raw data (.CDF format)                                                                  #
+# 2. ID to identify samples from same individual (XXXnames_injXXX): it should be an id for   #
+#    each individual with this format: id_inj where inj is the injection number (1,2).       #    
+#    For example: 123_1 refers to individual 123, injection one;                             # 
+#								  123_2 refers to individual 123, injection 2.                               #
+# 3. Phenotypic data to identify variables of unwanted variabilty that need to be adjusted.  #
+##############################################################################################
 
 ### SUMMARY ####
 # MODULE 1:
@@ -19,7 +23,8 @@
 #  2. Calculate total intesity for each sample and check for outlier
 #  3. ANOVA-type normalization
 #  4. Average between duplicates
-# 
+#  5. Feature-level correlation between duplicates
+#
 # CREATE idMS and idMS/MS spectra
 #
 # Specfun.R function
@@ -129,7 +134,7 @@ dev.off()
 Ld_cdf1_n2 <- Ld_cdf1_n[,!(colnames(Ld_cdf1_n) %in% c(colnames(Ld_cdf1_n)[TIC<XXXXX]))]
 
 ### 3. ANOVA-type normalization ###
-# Where XXXnamesXXX is a vector with the id if the samples (so that samples from the same individual have the same id)
+# Where XXXnames_injXXX is a vector with the id of the individuals and the injection (replicate) number; (so that samples from the same individual have the same id, but different injection)
 metabo_num <-  apply(t(Ld_cdf1_n2),2,as.numeric)
 pc <- pca(metabo_num,method="ppca", nPcs=4)
 
@@ -138,15 +143,14 @@ pc <- pca(metabo_num,method="ppca", nPcs=4)
 # For example, we run a linear regression for each feature, adjusting by season and storage time 
 lmres <- function(x){resid(lm(as.numeric(x)~as.numeric(season)+as.numeric(storage), na.action=na.exclude))}
 Ld_cdf1_n3 <- t(sapply(data.frame(t(Ld_cdf1_n2)),lmres))
-colnames(Ld_cdf1_n3) <- XXXnamesXXX
+colnames(Ld_cdf1_n3) <- XXXnames_injXXX 
 rownames(Ld_cdf1_n3) <- rownames(d)
 
 
 ### 4. Average between duplicates ###
 
-# Loop, select two injections from the same individuals, average them and calculate correlation
+# Loop, select two injections from the same individuals, average them
 D_S_C <- NULL
-CR <- NULL
 for (j in unique(substr(colnames(Ld_cdf1_n3),1,nchar(colnames(Ld_cdf1_n3))-2)))
 	{
 		# Select two samples form same individual
@@ -154,28 +158,54 @@ for (j in unique(substr(colnames(Ld_cdf1_n3),1,nchar(colnames(Ld_cdf1_n3))-2)))
 		
 		if (!is.null(dim(d_s)[2]))
 		{
-			# Averge
 			d_s_c <- rowMeans(d_s)
-			# Check correlations
-			cr <- cor(d_s, method="spearman", use="complete.obs")[upper.tri(cor(d_s, method="spearman", use="complete.obs"))]
-			# Transform correlation
-			zcr <- 0.5*log((1+cr)/(1-cr))
-		}else
+		}
+		else
 		{
 			d_s_c <- d_s
-			zcr <- NA
 		}
 		D_S_C <- rbind(D_S_C,d_s_c)
-		CR <- c(CR,zcr)
 	}
 	
 rownames(D_S_C) <- unique(substr(colnames(Ld_cdf1_n3),1,nchar(colnames(Ld_cdf1_n3))-2))
 
 # Make it a data.frame
-Ld_cdf1_n4 <- data.frame(cbind(rownames(D_S_C),CR, D_S_C), stringsAsFactors=F)
-colnames(Ld_cdf1_n4)[1:2] <- c("id","zcorr")
+Ld_cdf1_n4 <- data.frame(cbind(rownames(D_S_C), D_S_C), stringsAsFactors=F)
+colnames(Ld_cdf1_n4)[1] <- c("id")
 
-write.table(Ld_cdf1_n4,file="final_dataset.txt", row.names=F, col.names=T, quote=F, sep="\t")
+
+### 5. Feature-level correlation between duplicates ###
+## If not all the samples have duplicates, select only those samples with duplicates
+CRM <- NULL
+CRT <- NULL
+for (k in 1:nrow(Ld_cdf1_n3))
+{
+	cc <- Ld_cdf1_n3[k,]
+	cc1 <- cc[substr(colnames(Ld_cdf1_n3),nchar(colnames(Ld_cdf1_n3)),nchar(colnames(Ld_cdf1_n3)))=="1"]
+	cc1o <- cc1[order(names(cc1))]
+	cc2 <- cc[substr(colnames(Ld_cdf1_n3),nchar(colnames(Ld_cdf1_n3)),nchar(colnames(Ld_cdf1_n3)))=="2"]
+	cc2o <- cc2[order(names(cc2))]
+	
+	CR <- cor(cc2o,cc1o)
+	CR <- cor.test(as.numeric(cc2o),as.numeric(cc1o), alternative="greater")	
+	CRM <- c(CRM,CR$estimate)
+	CRT <- c(CRT,CR$p.value)
+}
+
+
+## Plot distribution between correlations
+## Plot the line corresponding to 5% FDR, features below this level have too low correlation and are excluded
+pdf("dist_corr_features.pdf")
+p <- density(CRM)
+plot(p, xlab="Pearson Correlation", main="Distribution correlation between features")
+abline(v=CRM[which.min(abs(p.adjust(CRT,method="BH")-0.05))])
+dev.off()
+
+### EXCLUDE FEATURES WITH POOR CORRELATION ###
+
+Ld_cdf1_n5 <- Ld_cdf1_n4[,c(TRUE,as.logical(CRM > CRM[which.min(abs(p.adjust(CRT,method="BH")-0.05))]))]
+
+write.table(Ld_cdf1_n5,file="final_dataset.txt", row.names=F, col.names=T, quote=F, sep="\t")
 
 
 #######################################
@@ -183,7 +213,7 @@ write.table(Ld_cdf1_n4,file="final_dataset.txt", row.names=F, col.names=T, quote
 #######################################
 
 
-t <- strsplit(gsub("M","", colnames(Ld_cdf1_n4_res)[c(-1,-2)]),"T")
+t <- strsplit(gsub("M","", colnames(Ld_cdf1_n5)[c(-1)]),"T")
 M <- as.numeric(sapply(t,"[",1))
 T <- as.numeric(sapply(t,"[",2))
 
@@ -231,154 +261,4 @@ source("specfun.R")
 
 # Loop each feature
 lapply(1:length(sig_list), specfun)
-
-
-
-################################
-##########SPECFUN.R ############
-### SAVE IT AS .R FILE #########
-### IT IS USED TO GENERATE #####
-### idMS and isMS/MS spectra ###
-################################
-
-## begin specfun
-specfun<- function (i) {
-targetmz<-sig_feat[i,"mz"]
-targetrt<-sig_feat[i,"rt"]
-
-##subset MSdata by retention time similarity to target feature for idMS recronstruction
-## get all the features in a certain rt window (define by rt_dev)
-rt_index<-intersect(which(rt>(targetrt-rt_dev)), which(rt<(targetrt+rt_dev)))
-if(length(rt_index)>1) MS<-MSdata2[,rt_index+1] else MS<-as.data.frame(MSdata2[,rt_index+1])
-if(length(rt_index)>1) MSMS<-MSMSdata2[,rt_index+1] else MSMS<-as.data.frame(MSMSdata2[,rt_index+1])
-names(MS)<-names(MSdata2)[rt_index+1]
-names(MSMS)<-names(MSMSdata2)[rt_index+1]
-
-
-
-
-# Calculate the correlation between the feature of interest and the features in the same rt window
-corfun<-function (x) {cor.test(MS[,sig_list[i]], MS[,x], exact=TRUE, na.rm=TRUE)$p.value}
-corfun2<-function (x) {cor.test(MS[,sig_list[i]], MS[,x], exact=TRUE, na.rm=TRUE)$estimate}
-if(cor_filter=="pval") pval<-as.numeric(sapply(1:dim(MS)[2], corfun))
-if(cor_filter=="rval")  rval<-as.numeric(sapply(1:dim(MS)[2], corfun2))
-if (cor_filter=="rval") idMS_index<-which(rval>rcut) else idMS_index<-which(pval<pcut)
-if(length(idMS_index) > 1) {
-	idMS<-MS[,idMS_index] 
-	names(idMS)<-names(MS)[idMS_index]
-	idMS_mass_Rt<-data.frame(sapply(names(idMS), strsplit, names(idMS), split="_"))
-	idMS_sig_feat_mz<-as.numeric(t(idMS_mass_Rt[1,]))
-	idMS_sig_feat_rt<-as.numeric(t(idMS_mass_Rt[2,]))
-	idMS_abundance<-colMeans(idMS)
-	idMS_spec<-data.frame(idMS_sig_feat_mz, idMS_sig_feat_rt, idMS_abundance, rval[idMS_index])
-	names(idMS_spec)<-c("mz", "rt", "intensity", "rval")
-	idMS_spec<-idMS_spec[order(idMS_spec[,"intensity"], decreasing=TRUE),]
-	row.names(idMS_spec)<-names(idMS)
-	} else
-   {idMS_spec<-data.frame(targetmz, targetrt, 100, 1)
-	row.names(idMS_spec)<-row.names(sig_feat)[i]
-	names(idMS_spec)<-c("mz", "rt", "intensity", "rval")}
-
-##write idMS spectra to msp library file
-if(length(idMS_index) > 1) {
-idMS_npeaks<-dim(idMS_spec)[1]
-write(paste("Name: ", row.names(sig_feat)[i], " MS spectrum", sep=""), libName, append=TRUE)
-write(paste("SYNON: $:00in-source", sep=""), libName, append=TRUE)
-write(paste("SYNON: $:04 0", sep=""), libName, append=TRUE)
-write(paste("Comment: r-value cutoff = ", rcut, sep=""), libName, append=TRUE)
-write(paste("Comment: rt window = ", rt_dev, " sec" , sep=""), libName, append=TRUE)
-write(paste("Comment:", round(idMS_spec[1,"mz"], digits=4),  round(idMS_spec[2,"mz"], digits=4),  round(idMS_spec[3,"mz"], digits=4),  round(idMS_spec[4,"mz"], digits=4),round(idMS_spec[5,"mz"], digits=4), round(idMS_spec[6,"mz"], digits=4), round(idMS_spec[7,"mz"], digits=4)), file=libName, append= TRUE)
-write(paste("Num Peaks:", idMS_npeaks), file=libName, append= TRUE)
-idMS_writefun<- function (j) {
-	ion<- paste(round(idMS_spec[j, "mz"], digits=4), " ", round(idMS_spec[j, "intensity"]), ";", sep="")
-		write(ion, file=libName, append= TRUE) } ##end writefun
-	lapply(1:dim(idMS_spec)[1], idMS_writefun)
-write("", file=libName, append= TRUE)
-} 
-
-
-
-#idMSMS below:
-corfun<-function (x) {cor.test(MS[,sig_list[i]], MSMS[,x], exact=TRUE, na.rm=TRUE)$p.value}
-corfun2<-function (x) {cor.test(MS[,sig_list[i]], MSMS[,x], exact=TRUE, na.rm=TRUE)$estimate}
-pval<-as.numeric(sapply(1:dim(MSMS)[2], corfun))
-rval<-as.numeric(sapply(1:dim(MSMS)[2], corfun2))
-if (cor_filter=="rval") idMSMS_index<-which(rval>rcut) else idMSMS_index<-which(pval<pcut)
-
-if(length(idMSMS_index) == 1) {  idMSMS<-data.frame(MSMS[,idMSMS_index], check.names=FALSE)
-		idMSMS_mass_Rt<-data.frame(sapply(names(MSMS)[idMSMS_index], strsplit, names(idMSMS), split="_"), check.names=FALSE)	
-		idMSMSrt<-as.numeric(as.vector(idMSMS_mass_Rt[2,1]))
-		idMSMSmz<-as.numeric(as.vector(idMSMS_mass_Rt[1,1]))
-		idMSMS_spec<-data.frame(idMSMSrt, idMSMSmz,  colMeans(idMSMS), rval[idMSMS_index])
-		names(idMSMS_spec)<-c("mz", "rt", "intensity", "rval")		
-		row.names(idMSMS_spec)<-names(MSMS)[idMSMS_index]} else
-			if  (length(idMSMS_index) > 1)  { idMSMS<-data.frame(MSMS[,idMSMS_index], check.names=FALSE)
-		idMSMS_mass_Rt<-data.frame(sapply(names(MSMS)[idMSMS_index], strsplit, names(idMSMS), split="_"), check.names=FALSE)	
-#		idMSMS_mass_Rt<-data.frame(sapply(names(idMSMS), strsplit, names(idMSMS), split="_"))
-		idMSMS_sig_feat_mz<-as.numeric(t(idMSMS_mass_Rt[1,]))
-		idMSMS_sig_feat_rt<-as.numeric(t(idMSMS_mass_Rt[2,]))
-		idMSMS_abundance<-colMeans(idMSMS)
-		idMSMS_spec<-data.frame(idMSMS_sig_feat_mz, idMSMS_sig_feat_rt, idMSMS_abundance, rval[idMSMS_index], check.names=FALSE)
-		names(idMSMS_spec)<-c("mz", "rt", "intensity", "rval")		
-		idMSMS_spec<-idMSMS_spec[order(idMSMS_spec[,"intensity"], decreasing=TRUE),]	} 			
-
-
-
-##write idMSMS spectra to msp library file
-if(length(idMSMS_index) > 0) {
-idMSMS_npeaks<-dim(idMSMS_spec)[1]
-write(paste("Name: ", row.names(sig_feat)[i], " idMSMS spectrum", sep=""), libName, append=TRUE)
-write(paste("SYNON: $:00in-source", sep=""), libName, append=TRUE)
-write(paste("SYNON: $:04 0", sep=""), libName, append=TRUE)
-write(paste("Comment: r-value cutoff = ", rcut, sep=""), libName, append=TRUE)
-write(paste("Comment: rt window = ", rt_dev, " sec" , sep=""), libName, append=TRUE)
-write(paste("Comment:", round(idMSMS_spec[1,"mz"], digits=4),  round(idMSMS_spec[2,"mz"], digits=4),  round(idMSMS_spec[3,"mz"], digits=4),  round(idMSMS_spec[4,"mz"], digits=4),  
-	round(idMSMS_spec[5,"mz"], digits=4), round(idMSMS_spec[6,"mz"], digits=4), round(idMSMS_spec[7,"mz"], digits=4)), file=libName, append= TRUE)
-write(paste("Num Peaks:", idMSMS_npeaks), file=libName, append= TRUE)
-idMSMS_writefun<- function (j) {
-	ion<- paste(round(idMSMS_spec[j, "mz"], digits=4), " ", round(idMSMS_spec[j, "intensity"]), ";", sep="")
-		write(ion, file=libName, append= TRUE) } ##end writefun
-	lapply(1:dim(idMSMS_spec)[1], idMSMS_writefun)
-write("", file=libName, append= TRUE)
-} 
-
-
-
-
-##plot reconstructed MS spectrum and selected DDA spectrum
-#maxx<-if(length(idMS_index)==0) {1.2*max(idMSMS_spec[,"mz"])} else {1.2*max(idMSMS_spec[,"mz"], idMS_spec[,"mz"])}
-if(any(ls()=="idMSMS_spec")==TRUE) maxx<-round(1.2*max(idMSMS_spec[,"mz"], idMS_spec[,"mz"])) else
-	maxx<-round(1.2*max(idMS_spec[,"mz"])) 
-
-parent<-sig_feat_list[i]
-pdf(file=paste(row.names(sig_feat)[i], ".pdf", sep=""))
-par(mfrow=c(2,1), pty="m", mar=c(0,4,3,0), omi=c(1,0.2,0,0.2))
-
-if(length(idMS_index) > 1) {
-plot(idMS_spec[,"mz"], idMS_spec[,"intensity"], type="h", xaxt="n", ann=FALSE, yaxs="i", xlim=c(40, maxx), ylim=c(0, max(idMS_spec[,"intensity"])*1.3))
-title(main = paste("MS spectrum:", targetmz, "@", targetrt, "sec"))
-text(idMS_spec[1:maxlabel,"mz"], idMS_spec[1:maxlabel,"intensity"], label=round(idMS_spec[1:maxlabel,"mz"], digits=3), pos=3, srt=90, offset=1, cex=0.85*(idMS_spec[,"rval"])^1.5)
-}  else {
-plot(50, 100, type="n", xaxt="n", ann=FALSE, yaxs="i", xlim=c(40, maxx), ylim=c(0, 100))
-text(mean(c(40, maxx)), 50, label="no correlating fragments", pos=1, offset=0.2)
-title(main = paste("MS spectrum:", targetmz, "@", targetrt, "sec"))
-}
-
-
-if(length(idMSMS_index) > 0) {
-maxx<-round(1.2*max(idMSMS_spec[,"mz"], idMS_spec[,"mz"]))
-plot(idMSMS_spec[,"mz"], idMSMS_spec[,"intensity"], type="h", ann=FALSE, yaxs="i", xlim=c(40, maxx), ylim=c(0, max(idMSMS_spec[,"intensity"])*1.3))
-title(main = paste("idMSMS spectrum:", targetmz, "@", targetrt, "sec"))
-text(idMSMS_spec[1:maxlabel,"mz"], idMSMS_spec[1:maxlabel,"intensity"], label=round(idMSMS_spec[1:maxlabel,"mz"], digits=3), pos=3, srt=90, offset=1, cex=0.85*(idMSMS_spec[,"rval"])^1.5)
-}  else {
-plot(50, 100, type="n", xaxt="n", ann=FALSE, yaxs="i", xlim=c(40, maxx), ylim=c(0, 100))
-
-text(mean(c(40, maxx)), 50, label="no correlating idMSMS fragments", pos=1, offset=0.2)
-title(main = paste("idMSMS spectrum:", targetmz, "@", targetrt, "sec"))
-}
-mtext("m/z", side=1, line=2.5, outer=TRUE, font=2)
-mtext("intensity", side=2, line=-0.5, outer=TRUE, font=2)
-dev.off()
-gc(verbose=FALSE)
-}  ##end specfun
 
